@@ -249,6 +249,25 @@
 
   // ---- the sign-in page ------------------------------------------------------------------------------------------
   function signIn(root) {
+    // A restored sign-in page can outlive the session cookie (another tab or
+    // a cross-site launch). Reconcile with a same-origin GET, never bypass CSRF.
+    let navigating = false;
+    async function resumeSession() {
+      if (navigating) return true;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      try {
+        const r = await fetch('/api/auth/state', {credentials: 'same-origin', cache: 'no-store', signal: controller.signal});
+        if (r.ok && (await r.json()).signed_in === true) {
+          if (!navigating) { navigating = true; location.reload(); }
+          return true;
+        }
+      } catch (_) { /* Keep ordinary sign-in available if the check fails. */ }
+      finally { clearTimeout(timeout); }
+      return navigating;
+    }
+    const sessionRace = (ex) => ex.status === 403 && ex.message === 'missing or wrong CSRF token: reload the page';
+    window.addEventListener('pageshow', (event) => { if (event.persisted) resumeSession(); });
     const plain = document.body.hasAttribute('data-plain-http');
     const lock = h('p', {class: 'hint'}, '5 wrong tries = 15 min lock.');
     const card = (...kids) => fill(root, h('div', {class: 'sheet static login'}, brand(), kids));
@@ -263,9 +282,11 @@
         err.textContent = '';
         go.disabled = true;
         try {
+          if (await resumeSession()) return;
           const r = await call('/api/auth/login', {username: user.value, password: pw.value});
           code(r.ticket);
         } catch (ex) {
+          if (sessionRace(ex) && await resumeSession()) return;
           err.textContent = ex.message;
           pw.value = '';
           pw.focus();
@@ -288,9 +309,11 @@
         err.textContent = '';
         go.disabled = true;
         try {
+          if (await resumeSession()) return;
           await call('/api/auth/code', recovery ? {ticket, recovery: read()} : {ticket, code: read()});
           location.reload();
         } catch (ex) {
+          if (sessionRace(ex) && await resumeSession()) return;
           err.textContent = ex.message;
           if (ex.status === 401 && /again/.test(ex.message)) { password(); return; }
           if (box && box.clear) box.clear();
@@ -321,6 +344,7 @@
     }
 
     password();
+    resumeSession();
   }
 
   window.HFLogin = {enroll, strength, codeBoxes};
