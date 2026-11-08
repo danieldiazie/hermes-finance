@@ -90,9 +90,17 @@ def known_platform(name: str) -> bool:
     if callable(check):
         return bool(check(name))
     known = getattr(scheduler, "_KNOWN_DELIVERY_PLATFORMS", None)
-    if known is None:
-        raise SchedulerUnavailable("can't tell which delivery platforms this Hermes knows")
-    return name.lower() in known
+    if known is not None:
+        return name.lower() in known
+    # Newer Hermes keeps the delivery contract in its dedicated module.
+    try:
+        from cron import scheduler_delivery
+    except ImportError:
+        scheduler_delivery = None
+    check = getattr(scheduler_delivery, "_is_known_delivery_platform", None)
+    if callable(check):
+        return bool(check(name))
+    raise SchedulerUnavailable("can't tell which delivery platforms this Hermes knows")
 
 
 def create(home: Path, **fields: Any) -> dict[str, Any]:
