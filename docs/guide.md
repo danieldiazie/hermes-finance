@@ -882,8 +882,18 @@ the monthly totals (every 2 months = 0.5).
   usual's top or under half its bottom gets a quiet "higher / lower than usual" tag on the transaction and the Recurring
   row (nothing else changes). **Edit schedule** / **Stop tracking** on a Recurring row's sheet or the transaction
   sheet: a tracked bill stops, a detected one is hidden (the same `tracked_bills` row, `stopped_at`).
+- **Use my amount** (schema **v20**, `tracked_bills.pinned`; the sheet's switch, `--pin` / `--unpin`, the tool's `pin`):
+  the amount you type IS the expected amount (a range: its middle), however many charges the bill has, and for a bill
+  that is the same each time too. You know the next charge better than its history does: a price rise, two charges from
+  one merchant combined, a plan downgrade. It needs an amount; clearing the amount clears it; it never changes "Same" /
+  "Changes each time". Everywhere the bill's amount goes (Recurring, the calendar, budgets still due, Left to spend, the
+  pace, `finance_bills`), it is that amount, labelled "what you set".
 - **Late** only after the cadence's longest interval + 5 days since the last charge (monthly 40, every 2 months 75).
   An every-2-months bill counts in "still due" and **Left to spend** only in the month it's expected, at its estimate.
+- **A month ahead reserves its bills** (v20): the Budgets page for a future month counts the recurring bills the
+  calendar projects there (monthly or slower) in each capped category's `due` and the month's `left` and per-day, so a
+  month that has not started shows what is free after its bills, not its whole caps. The Overview projection and the pace
+  stay about this month; a past month owes nothing.
 - Everywhere: Overview bills and Coming up, Recurring (rows, calendar chips with logos, the phone's agenda), budgets
   still due, the pace, `finance bills` (+ `track` / `untrack`), `finance_bills` and MCP (cadence, variable, estimate,
   usual, source, last paid from, outlier), and the Sunday summary (it reads `/api/overview`, `/api/budgets` and
@@ -892,8 +902,8 @@ the monthly totals (every 2 months = 0.5).
 | endpoint | returns |
 |---|---|
 | `GET /api/bills/lookup?transaction_id=` or `?key=` | the merchant's bill (or none; `hidden` when stopped), what Track as a bill starts with, the charge it starts from, its latest charges, the schedules |
-| `GET /api/bills/preview?transaction_id=\|key=&every=&varies=&usually=` | what Track as a bill would save, before it does: `{summary, bill}` |
-| `POST /api/bills/track`, `POST /api/bills/stop` | `{action: track\|update, transaction_id\|key, every, varies, usually}`; `{key}`. Through the gate and CSRF like every write |
+| `GET /api/bills/preview?transaction_id=\|key=&every=&varies=&usually=&pin=` | what Track as a bill would save, before it does: `{summary, bill}` |
+| `POST /api/bills/track`, `POST /api/bills/stop` | `{action: track\|update, transaction_id\|key, every, varies, usually, pin}`; `{key}`. Through the gate and CSRF like every write |
 | `POST /api/mcp/pending/approve`, `POST /api/mcp/pending/decline` | `{id}`: a change an MCP agent asked for, applied exactly as the Hermes plugin applies one after its approval card, or declined |
 
 ## Sync now, fresh data from the banks, payments in transit

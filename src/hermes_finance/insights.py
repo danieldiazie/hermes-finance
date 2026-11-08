@@ -379,15 +379,28 @@ def _bills_due(periodic: list[dict[str, Any]], month: str, today: date) -> list[
     return [r for r in periodic if today.isoformat() <= r["next_expected"] <= end and not r["paid_this_month"]]
 
 
+def _bills_expected(periodic: list[dict[str, Any]], month: str, today: date) -> list[dict[str, Any]]:
+    """The recurring items a month will owe: the current month's _bills_due; for a month ahead, every day the Recurring
+    calendar projects an item on in that month (billcal.occurrences, the same projection the calendar's chips come from),
+    each as the item with that day as `next_expected`, so a budget for a future month reserves its bills before they
+    post. A past month owes nothing."""
+    if month <= month_of(today):
+        return _bills_due(periodic, month, today)
+    from . import billcal   # billcal imports this module: bound here, the way groupbudget does
+    y, m = parse_month(month)
+    start, end = date(y, m, 1), date(y, m, days_in_month(month))
+    return [{**r, "next_expected": occ["date"]} for r in periodic
+            for occ in billcal.occurrences(r, start, end, today) if occ["state"] != "paid"]
+
+
 def bills_due_by_category(conn: sqlite3.Connection, month: str, today: date | None = None,
                           rec: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
-    """The month's recurring bills still due (the pace projection's bills_due), per category, soonest first."""
+    """The month's recurring bills still due (this month: the pace projection's bills_due; a month ahead: the bills the
+    calendar projects there, _bills_expected), per category, soonest first. A past month: none."""
     today = _today(today)
-    if month != month_of(today):
-        return {}
     rec = rec if rec is not None else recurring(conn, today)
     out: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for r in sorted(_bills_due(_periodic(rec), month, today), key=lambda r: (r["next_expected"], r["merchant"])):
+    for r in sorted(_bills_expected(_periodic(rec), month, today), key=lambda r: (r["next_expected"], r["merchant"])):
         out[r["category"]].append({"merchant": r["merchant"], "amount": r["amount"],
                                    "next_expected": r["next_expected"], "category": r["category"],
                                    "variable": r["variable"]})
@@ -399,7 +412,8 @@ def bills_due_by_category(conn: sqlite3.Connection, month: str, today: date | No
 def category_spend(conn: sqlite3.Connection, month: str, today: date | None = None,
                    rec: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Every spending category: spend, count, last month, 3-month average, cap, pct of cap (spend / cap), its
-    recurring bills still due this month (`due`, `bills_due`; current month only), left (cap - spend - due, negative
+    recurring bills still due (`due`, `bills_due`: this month's still to come, or a month ahead's projected ones; a past
+    month's none), left (cap - spend - due, negative
     when over; None without a cap) and status. The status comes from spend + due: a bill that will land this month
     counts before it posts. With rollover on for a category (TASK-19, rollover.py), `cap` is the effective cap (the cap
     you set, `base_cap`, plus last month's unused part, `rollover`): pct, left and status use it."""
@@ -463,8 +477,8 @@ def budgets(conn: sqlite3.Connection, month: str, today: date | None = None,
     """Capped categories only (category_spend() rows: each has due, left = cap - spend - due and its status).
 
     left = total_cap - total_spend - total_due: the net. An overspent cap counts against it, and so do the capped
-    categories' recurring bills still due this month (current month only), so it goes negative when the month is
-    over. It splits into `under` (what's still free in the `under_count` caps not used up) minus `over_amount` (how
+    categories' recurring bills still due (this month's, or a month ahead's projected ones: a future month starts at
+    its caps less its bills), so it goes negative when the month is over. It splits into `under` (what's still free in the `under_count` caps not used up) minus `over_amount` (how
     far the `over` caps are past theirs). per_day spreads max(left, 0) over the days left (days after today; on the
     last day it's all for today): 0 once the net is used up, None for a past month.
 
@@ -800,7 +814,8 @@ def _next_charge(last_date: date, cadence: str, step: int, charges: list[tuple[d
 
 def _item(*, merchant: str, key: str, keys: list[str], kind: str, category: str, cadence: str, amount: float,
           variable: bool, step: int, charges: list[tuple[date, float]], today: date, txns: Sequence[Any],
-          usual: dict[str, Any] | None, source: str, logo: str | None, icon: str | None) -> dict[str, Any]:
+          usual: dict[str, Any] | None, source: str, logo: str | None, icon: str | None,
+          pinned: bool = False) -> dict[str, Any]:
     last_date, last_amount = charges[-1]
     nxt = _next_charge(last_date, cadence, step, charges)
     until, status = _status(last_date, nxt, cadence, today)
@@ -827,6 +842,7 @@ def _item(*, merchant: str, key: str, keys: list[str], kind: str, category: str,
         "estimate": amount if variable else None,
         "amount_label": amount_label(amount, variable),
         "usual": usual,                            # {low, high, source: charges | you} or None
+        "pinned": pinned,                          # v20: amount IS the usual the owner set, whatever the charges say
         "source": source,                          # detected | tracked
         "last_account": _account(txns, last_date), # "last paid from"
         "outlier": outlier(last_amount, usual),    # the last charge: higher / lower than usual, or None
@@ -879,7 +895,10 @@ def _tracked_item(conn: sqlite3.Connection, t: dict[str, Any], txns: list[Any], 
     step = math.floor(med + 0.5) if med is not None and lo <= med <= hi else NOMINAL_DAYS[cadence]
     usual = usual_of(t)
     variable = bool(t["variable"])
-    if not variable:
+    pinned = bool(t.get("pinned")) and usual is not None
+    if pinned:   # v20: what the owner set is what's expected (one amount, or a range's middle), however many charges
+        amount = (usual["low"] + usual["high"]) / 2
+    elif not variable:
         amount = charges[-1][1]
     elif usual and len(charges) < ESTIMATE_CHARGES:
         amount = (usual["low"] + usual["high"]) / 2
@@ -896,7 +915,7 @@ def _tracked_item(conn: sqlite3.Connection, t: dict[str, Any], txns: list[Any], 
     return _item(merchant=merchant, key=t["merchant_key"],
                  keys=keys, kind=kind, category=last["category"] if last else "Other", cadence=cadence, amount=amount,
                  variable=variable, step=step, charges=charges, today=today, txns=txns, usual=usual, source="tracked",
-                 logo=logo, icon=icon)
+                 logo=logo, icon=icon, pinned=pinned)
 
 
 _REC_SELECT = """SELECT v.transaction_id, v.date, v.name, v.merchant_name, v.spend, v.category, v.is_income, v.is_transfer,

@@ -317,11 +317,11 @@ def _bill_plan(conn: sqlite3.Connection, a: dict[str, Any]) -> dict[str, Any]:
     usually = a.get("usually", bills.UNSET)
     if isinstance(usually, list) and not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in usually):
         raise ToolError("usually must be a number or a list of two numbers [low, high]")
-    if a["action"] == "stop" and any(k in a for k in ("every", "varies", "usually")):
+    if a["action"] == "stop" and any(k in a for k in ("every", "varies", "usually", "pin")):
         raise ToolError("stop takes only the merchant")
     try:
         return bills.plan(conn, today(), a["action"], merchant=a["merchant"], every=a.get("every"),
-                          varies=a.get("varies"), usually=usually)
+                          varies=a.get("varies"), usually=usually, pin=a.get("pin"))
     except bills.BillError as e:
         raise ToolError(str(e)) from None
 
@@ -461,7 +461,10 @@ TOOLS: dict[str, Tool] = {t.name: t for t in (
           "varies": {"type": "boolean", "description": "true: the amount changes each time (a utility); default: from "
                                                        "the category"},
           "usually": {"type": ["number", "array", "null"], "items": {"type": "number"}, "minItems": 1, "maxItems": 2,
-                      "description": "what a bill that changes usually is: an amount, or [low, high] (null clears it)"}},
+                      "description": "what a bill that changes usually is: an amount, or [low, high] (null clears it)"},
+          "pin": {"type": "boolean", "description": "true: usually IS the expected amount, whatever the charges say "
+                                                    "(needs usually; works for a bill that is the same each time too); "
+                                                    "false: back to the charges; default: keep"}},
          _track_bill, required=("action", "merchant"), write=True),
 )}
 READS = tuple(n for n, t in TOOLS.items() if not t.write and not t.action)

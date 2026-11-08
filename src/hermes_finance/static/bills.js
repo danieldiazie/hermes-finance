@@ -17,7 +17,7 @@
     control, h('p', {class: 'ferr', role: 'alert'}));
   const usualValue = (u) => (u ? (u[0] === u[1] ? String(u[0]) : `${u[0]}–${u[1]}`) : '');
   const nextLine = (b) => [`Next ${b.variable ? '~' : ''}${fmtDate(b.next_expected)}`, billAmt(b),
-    b.variable && b.usual ? `usually ${usualText(b.usual)}` : null].filter(Boolean).join(' · ');
+    b.pinned && b.usual ? 'what you set' : b.variable && b.usual ? `usually ${usualText(b.usual)}` : null].filter(Boolean).join(' · ');
   const from = (a) => (a ? nameMask(acctName(a.name) || instShort(a.institution), a.mask, {pre: 'from '}) : null);
 
   // after a change: the page (and an open transaction's Bill section) shows it
@@ -73,19 +73,26 @@
 
   // ---- Track as a bill / Edit schedule ----------------------------------------------------------------------------
   // o: /api/bills/lookup's answer + {action: track | update, transaction_id (track from a transaction)}
+  // v20: "Use my amount" (pin): the amount typed is what bills and budgets expect, whatever the charges say, for a bill
+  // that is the same each time as much as one that changes. The field shows for a bill that changes or a pinned one.
   function trackSheet(o, back) {
     const upd = o.action === 'update';
-    const st = {every: o.suggest.every, varies: o.suggest.varies};
+    const st = {every: o.suggest.every, varies: o.suggest.varies, pin: Boolean(o.suggest.pin)};
     const who = o.transaction_id ? {transaction_id: o.transaction_id} : {key: o.key};
     const sel = h('select', {id: 'bt-every', 'aria-label': 'Schedule'},
       o.schedules.map((x) => h('option', {value: x.every, selected: x.every === st.every}, x.label)));
     const seg = h('div', {class: 'seg bseg', role: 'group', 'aria-label': 'Amount'},
       [['same', 'Same each time'], ['varies', 'Changes each time']].map(([k, label]) => h('button', {type: 'button', dataset: {k},
         onclick: () => { st.varies = k === 'varies'; redraw(); }}, label)));
+    const pinSw = h('button', {class: 'tgl', type: 'button', id: 'bt-pin', role: 'switch', 'aria-checked': String(st.pin),
+      'aria-label': 'Use my amount', onclick: () => { st.pin = !st.pin; redraw(); if (st.pin) usual.focus(); }}, h('i', {}));
+    const pinRow = h('div', {class: 'fld pinrow', dataset: {f: 'pin'}}, h('span', {class: 'grow'}, h('b', {}, 'Use my amount'),
+      h('span', {}, 'What you type is the expected amount, whatever the charges say.')), pinSw);
     const usual = h('input', {id: 'bt-usual', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: 'e.g. 100–150',
       value: usualValue(o.suggest.usually), 'aria-label': 'Usually about'});
     const usualFld = fld('Usually about', h('div', {class: 'inp'}, h('span', {class: 'pre', 'aria-hidden': 'true'}, '$'), usual),
       {key: 'usually', for: 'bt-usual', optional: true});
+    const usualLbl = usualFld.querySelector('label');
     const usualHint = h('p', {class: 'hint'}, 'One amount or a range. Until it has 3 charges, the middle of this is the estimate.');
     usualFld.append(usualHint);
     const preview = h('p', {class: 'bprev', 'aria-live': 'polite'});
@@ -96,14 +103,20 @@
       if (slot) slot.textContent = e.message;
       else preview.textContent = e.message;
     };
-    const body = () => ({action: o.action, ...who, every: sel.value, varies: st.varies, usually: st.varies ? usual.value.trim() : ''});
+    const body = () => ({action: o.action, ...who, every: sel.value, varies: st.varies, pin: st.pin,
+      usually: st.varies || st.pin ? usual.value.trim() : ''});
     let timer = null;
     const ask = () => {
       clearTimeout(timer);
+      if (st.pin && !usual.value.trim()) {   // nothing to preview until the amount is typed (the server would refuse)
+        errs();
+        fill(preview, null);
+        return;
+      }
       timer = setTimeout(async () => {
         const b = body();
         try {
-          const d = await api('/api/bills/preview', {...b, varies: b.varies ? '1' : '0'});
+          const d = await api('/api/bills/preview', {...b, varies: b.varies ? '1' : '0', pin: b.pin ? '1' : '0'});
           errs();
           fill(preview, d.bill ? [icon('calendar'), h('span', {}, nextLine(d.bill))] : null);
         } catch (e) {
@@ -114,7 +127,12 @@
     };
     const redraw = () => {
       seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String((b.dataset.k === 'varies') === st.varies)));
-      usualFld.hidden = !st.varies;
+      pinSw.setAttribute('aria-checked', String(st.pin));
+      usualFld.hidden = !(st.varies || st.pin);
+      fill(usualLbl, st.varies ? 'Usually about' : 'Expected amount', st.pin ? null : h('em', {}, 'optional'));
+      usual.setAttribute('aria-label', st.varies ? 'Usually about' : 'Expected amount');
+      usualHint.textContent = st.pin ? 'Used as the expected amount in bills and budgets, whatever the charges say.'
+        : 'One amount or a range. Until it has 3 charges, the middle of this is the estimate.';
       ask();
     };
     sel.addEventListener('change', ask);
@@ -140,7 +158,7 @@
       h('div', {class: 'shd'}, back ? backBtn(back) : null, h('h2', {id: 'sheet-title'}, upd ? 'Edit schedule' : 'Track as a bill'), closeBtn()),
       h('p', {}, h('b', {}, o.merchant), start ? ` · ${start}` : null),
       h('div', {class: 'flds trackf'}, fld('Schedule', h('div', {class: 'inp sel'}, sel), {key: 'every', for: 'bt-every'}),
-        fld('Amount', seg, {key: 'varies'}), usualFld),
+        fld('Amount', seg, {key: 'varies'}), pinRow, usualFld),
       preview,
       h('div', {class: 'row'}, saveBtn)], {narrow: true, cls: 'billsheet', focus: sel});
     redraw();
@@ -197,8 +215,9 @@
         : bigMoney(b.amount, 's'),
       h('div', {class: 'sub'}, [`${b.cadence_label[0].toUpperCase()}${b.cadence_label.slice(1)}`, b.category,
         `next ${b.variable ? '~' : ''}${fmtDate(b.next_expected)}`].join(' · ')),
-      b.variable && b.usual ? h('div', {class: 'sub dim'}, `Usually ${usualText(b.usual)} ${b.usual.source === 'you'
-        ? '(what you said)' : '(its charges in the last 12 months)'}`) : null),
+      b.pinned && b.usual ? h('div', {class: 'sub dim'}, `${usualText(b.usual)} (what you set)`)
+        : b.variable && b.usual ? h('div', {class: 'sub dim'}, `Usually ${usualText(b.usual)} ${b.usual.source === 'you'
+          ? '(what you said)' : '(its charges in the last 12 months)'}`) : null),
       h('div', {class: 'tsec'}, h('div', {class: 'tsh'}, h('b', {}, 'Charges'), h('span', {}, b.source === 'tracked' ? 'Tracked by hand'
         : `Found from ${plural(b.charges, 'charge')}`)),
       d.charges.length ? d.charges.map(chargeRow) : h('p', {class: 'hint'}, `Last paid ${fmtDate(b.last_date, true)}.`)),

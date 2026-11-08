@@ -792,6 +792,8 @@ def cmd_bills_track(args) -> int:
     kw = {"every": args.every, "varies": args.varies}
     if args.usually is not None:
         kw["usually"] = args.usually
+    if args.pin is not None:
+        kw["pin"] = args.pin
     return _bill_write(args, "track", **kw)
 
 
@@ -1123,13 +1125,18 @@ JSON: {today, next_days, until, count,
   interval + 5 days since the last charge: monthly 40, every 2 months 75). paid_this_month: its last charge was this
   calendar month. Sorted by next_expected.
 
-  finance bills track MERCHANT [--every 2m] [--varies | --same] [--usually 100-150]   (writes)
-  finance bills untrack MERCHANT                                                      (writes)"""
+  pinned: the amount is the usual you gave (--pin), whatever the charges say; amount_label "$445.00".
+
+  finance bills track MERCHANT [--every 2m] [--varies | --same] [--usually 100-150] [--pin | --unpin]   (writes)
+  finance bills untrack MERCHANT                                                                       (writes)"""
 BILLS_TRACK_EPILOG = """Every charge from the merchant, on any account, confirms the bill; the next one is expected one schedule after
 the last. --every: 1w, 2w, 1m, 2m, 3m, 6m or 1y. Not given: the schedule it was detected on, else every month; the
 amount "changes each time" for a utility, else the same each time. It starts from the merchant's latest charge. Tracking
 a bill again replaces its settings. --usually (a bill that changes): one amount or a range; while there are fewer than 3
 charges its middle is the estimate (one big bill doesn't set it), after that the median of the last 3.
+--pin: --usually IS the expected amount (a range: its middle), however many charges there are, and for a bill that is
+the same each time too (you know the next charge: a price rise, two charges from one merchant). --unpin: back to the
+charges. The pin needs --usually; clearing the usual amount clears it.
 
 The merchant must be in your transactions: its exact name, or a unique case-insensitive match (an ambiguous or unknown
 name is refused with the candidates). Exit 2 and nothing saved when it can't be done."""
@@ -1215,7 +1222,12 @@ def _add_read_commands(sub) -> None:
     amount = t.add_mutually_exclusive_group()
     amount.add_argument("--varies", action="store_true", default=None, help="the amount changes each time")
     amount.add_argument("--same", dest="varies", action="store_false", help="the same amount each time")
-    t.add_argument("--usually", metavar="100-150", help="what it usually is: an amount or a range (implies --varies)")
+    t.add_argument("--usually", metavar="100-150", help="what it usually is: an amount or a range (implies --varies, "
+                                                        "unless --pin)")
+    pin = t.add_mutually_exclusive_group()
+    pin.add_argument("--pin", dest="pin", action="store_true", default=None,
+                     help="use --usually as the expected amount, whatever the charges say (same or changing)")
+    pin.add_argument("--unpin", dest="pin", action="store_false", help="back to the amount its charges say")
     t.add_argument("--json", action="store_true", help="print the result as JSON")
     t.set_defaults(func=cmd_bills_track)
     u = bsub.add_parser("untrack", help="stop tracking a bill (a detected one is hidden from bills; writes)",

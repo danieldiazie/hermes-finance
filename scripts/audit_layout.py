@@ -393,6 +393,9 @@ STATES: list[tuple[str, str, list[str], str, str]] = [
                                             wait_for("#sheet.billsheet .trackf", SLOW), *more], "modal", "all")
       for sfx, more in (("", [wait_for("#sheet .bprev svg", SLOW)]),
                         ("-varies", [click("#sheet .bseg button", "Changes each time"), FILL.format(sel="#bt-usual", v="100-150"),
+                                     wait_for("#sheet .bprev svg", SLOW)]),
+                        # v20: "Use my amount" on a bill that is the same each time: the Expected amount field appears
+                        ("-pinned", [click("#sheet #bt-pin"), FILL.format(sel="#bt-usual", v="445"),
                                      wait_for("#sheet .bprev svg", SLOW)]))],   # (TEST-SPEED: the preview's 200 ms debounce,
                                                                                   # its answer and redraw: settled(), not 600 ms)
 ]

@@ -80,10 +80,10 @@ def bill_lookup(conn: sqlite3.Connection, params: dict[str, str], today: date) -
 def _bill_args(d: dict[str, Any]) -> dict[str, Any]:
     """The Track as a bill sheet's fields: the merchant (key, or the transaction it was opened from), every, varies,
     usually (a number, [low, high] or text such as "100-150"; empty: none)."""
-    unknown = sorted(set(d) - {"action", "key", "transaction_id", "every", "varies", "usually"})
+    unknown = sorted(set(d) - {"action", "key", "transaction_id", "every", "varies", "usually", "pin"})
     if unknown:
         raise api.ApiError(f"unknown field {str(unknown[0])[:40]!r}")
-    out = {k: d[k] for k in ("key", "transaction_id", "every", "varies") if d.get(k) is not None}
+    out = {k: d[k] for k in ("key", "transaction_id", "every", "varies", "pin") if d.get(k) is not None}
     if "usually" in d:
         out["usually"] = d["usually"]
     if "key" not in out and "transaction_id" not in out:
@@ -94,8 +94,9 @@ def _bill_args(d: dict[str, Any]) -> dict[str, Any]:
 def bill_preview(conn: sqlite3.Connection, params: dict[str, str], today: date) -> dict[str, Any]:
     """What Track as a bill would save, before it does: the bill as it would show, and the change in plain words."""
     args = _bill_args({k: v for k, v in params.items() if k != "action"})
-    if "varies" in args:
-        args["varies"] = args["varies"] in ("1", "true")
+    for flag in ("varies", "pin"):
+        if flag in args:
+            args[flag] = args[flag] in ("1", "true")
     p = _call(bills.plan, conn, today, params.get("action") or "track", **args)
     return {"summary": p["summary"], "bill": p["bill"] and api._clean_images(p["bill"])}
 

@@ -16,6 +16,11 @@ it again clears the stop.
 
 Usually (a bill that changes): one amount or a range, low <= high, > 0. While there are fewer than 3 real charges its
 middle is the estimate; after that the median of the last 3, the range still shown. Giving it means the amount changes.
+
+Pin (v20, "Use my amount"): with it, "usually" IS the expected amount (one amount, or a range's middle) however many
+charges there are and whether the bill changes each time or not: the owner knows the next charge (a price rise, two
+charges from one merchant, a plan downgrade) better than its history does. It needs a usual amount; clearing the usual
+amount clears it; it never changes "same" / "changes each time".
 """
 
 from __future__ import annotations
@@ -173,16 +178,20 @@ def _day(iso: str) -> str:
 
 
 def amount_words(bill: dict[str, Any]) -> str:
-    """'~$125 est. (usually $100–150)', '~$296 est.' or '$465.10'."""
+    """'~$125 est. (usually $100–150)', '~$296 est.', '$465.10', or '$445.00 (what you set)' for a pinned amount."""
     out = bill["amount_label"]
     u = bill.get("usual")
-    if bill["variable"] and u and u["source"] == "you":
+    if bill.get("pinned") and u:
+        out += " (what you set)"
+    elif bill["variable"] and u and u["source"] == "you":
         out += f" (usually {insights.usual_text(u['low'], u['high'])})"
     return out
 
 
-def _settings_words(cadence: str, variable: bool, usual: tuple[float, float] | None) -> str:
+def _settings_words(cadence: str, variable: bool, usual: tuple[float, float] | None, pinned: bool = False) -> str:
     what = SCHEDULE_WORDS[cadence]
+    if pinned and usual:
+        return f"{what}, {insights.usual_text(*usual)} (what you set)"
     if not variable:
         return f"{what}, the same amount each time"
     return f"{what}, usually {insights.usual_text(*usual)}" if usual else f"{what}, the amount changing each time"
@@ -211,27 +220,35 @@ def suggest(conn: sqlite3.Connection, key: str, rec: dict[str, Any]) -> dict[str
     bill = bill_of(rec, key)
     row = _row(conn, key)
     if bill:
-        usual = (row["usual_low"], row["usual_high"]) if row and not row["stopped_at"] and row["usual_low"] else None
-        return {"every": EVERY_OF[bill["cadence"]], "varies": bill["variable"], "usually": usual}
+        live = row and not row["stopped_at"]
+        usual = (row["usual_low"], row["usual_high"]) if live and row["usual_low"] else None
+        return {"every": EVERY_OF[bill["cadence"]], "varies": bill["variable"], "usually": usual,
+                "pin": bool(live and row["pinned"] and usual)}
     if row:  # stopped: tracking it again starts from how it was
-        return {"every": EVERY_OF[row["cadence"]], "varies": bool(row["variable"]),
-                "usually": (row["usual_low"], row["usual_high"]) if row["usual_low"] else None}
+        usual = (row["usual_low"], row["usual_high"]) if row["usual_low"] else None
+        return {"every": EVERY_OF[row["cadence"]], "varies": bool(row["variable"]), "usually": usual,
+                "pin": bool(row["pinned"] and usual)}
     last = latest_charge(conn, {key})
     utility = bool(last) and insights.is_utility(last["pfc_detailed"], (last["merchant_name"] or last["name"] or ""))
-    return {"every": "1m", "varies": utility, "usually": None}
+    return {"every": "1m", "varies": utility, "usually": None, "pin": False}
 
 
 def plan(conn: sqlite3.Connection, today: date, action: Any, *, merchant: Any = None, key: str | None = None,
          transaction_id: str | None = None, every: Any = None, varies: Any = None, usually: Any = UNSET,
-         rec: dict[str, Any] | None = None) -> dict[str, Any]:
+         pin: Any = None, rec: dict[str, Any] | None = None) -> dict[str, Any]:
     """Check a request and work out what it would change, without changing anything. The merchant is named by `key`
     (a merchant key, from a page), `transaction_id` (its charge: the transaction sheet) or `merchant` (text: the CLI and
     the tool). {action, key, merchant, row (what apply saves), before (the bill now, or None), bill (the bill after, or
-    None when it stops), summary (the change in plain words)}. BillError when it can't be done."""
+    None when it stops), summary (the change in plain words)}. BillError when it can't be done.
+
+    pin (v20): True makes `usually` the expected amount (it must be given, or already there); False goes back to the
+    charges; None keeps the bill's pin while it still has a usual amount."""
     if action not in ACTIONS:
         raise BillError(f"action must be one of {', '.join(ACTIONS)}", field="action")
     if varies is not None and not isinstance(varies, bool):
         raise BillError("varies must be true (the amount changes each time) or false", field="varies")
+    if pin is not None and not isinstance(pin, bool):
+        raise BillError("pin must be true (use the usual amount as the expected amount) or false", field="pin")
     rec = rec if rec is not None else insights.recurring(conn, today)
     if transaction_id is not None:
         t = conn.execute("SELECT merchant_name, name, spend FROM v_transactions WHERE transaction_id = ?",
@@ -267,7 +284,7 @@ def plan(conn: sqlite3.Connection, today: date, action: Any, *, merchant: Any = 
             summary = (f"Stop tracking {name} as a bill: it's no longer listed with your bills (found "
                        f"{SCHEDULE_WORDS[before['cadence']]}, {before['amount_label']}). Its charges stay as they are.")
             new = {"merchant_key": key, "merchant": name, "cadence": before["cadence"], "variable": int(before["variable"]),
-                   "usual_low": None, "usual_high": None, **_anchor(conn, keys, None), "stopped_at": "(now)"}
+                   "usual_low": None, "usual_high": None, "pinned": 0, **_anchor(conn, keys, None), "stopped_at": "(now)"}
         return {"action": action, "key": key, "merchant": name, "row": new, "before": before, "bill": None,
                 "summary": summary}
 
@@ -275,39 +292,44 @@ def plan(conn: sqlite3.Connection, today: date, action: Any, *, merchant: Any = 
         raise BillError(f"{name} isn't tracked or detected as a bill yet: track it first (action track)", field="merchant")
     base = suggest(conn, key, rec) if action == "track" or not tracked else {
         "every": EVERY_OF[row["cadence"]], "varies": bool(row["variable"]),
-        "usually": (row["usual_low"], row["usual_high"]) if row["usual_low"] else None}
+        "usually": (row["usual_low"], row["usual_high"]) if row["usual_low"] else None,
+        "pin": bool(row["pinned"] and row["usual_low"])}
     cadence = parse_every(every) if every is not None else EVERY[base["every"]]
     usual = base["usually"] if action == "update" else None
     if usually is not UNSET:
         usual = parse_usually(usually)
+    # v20: the pin needs a usual amount; not asked about, it stays while the amount does (clearing the amount clears it)
+    pinned = bool(pin) if pin is not None else (base["pin"] and usual is not None)
+    if pinned and not usual:
+        raise BillError("Use my amount needs the amount: give usually (one amount, or a range)", field="usually")
     if varies is None:
-        varies = True if (usually is not UNSET and usual) else base["varies"]
-    if not varies and usually is not UNSET and usual:
+        varies = True if (usually is not UNSET and usual and not pinned) else base["varies"]
+    if not varies and not pinned and usually is not UNSET and usual:
         raise BillError("usually is for a bill whose amount changes: leave it out, or say the amount changes (varies)",
                         field="usually")
-    if not varies:
+    if not varies and not pinned:
         usual = None
     anchor = ({k: row[k] for k in ("anchor_date", "anchor_amount", "anchor_transaction_id")}
               if tracked and action == "update" else _anchor(conn, keys, transaction_id))
     new = {"merchant_key": key, "merchant": name, "cadence": cadence, "variable": int(varies),
-           "usual_low": usual[0] if usual else None, "usual_high": usual[1] if usual else None, **anchor,
-           "created_at": row["created_at"] if row else now(), "updated_at": now(), "stopped_at": None}
+           "usual_low": usual[0] if usual else None, "usual_high": usual[1] if usual else None, "pinned": int(pinned),
+           **anchor, "created_at": row["created_at"] if row else now(), "updated_at": now(), "stopped_at": None}
     others = [t for t in insights.tracked_rows(conn) if t["merchant_key"] != key]
     after = bill_of(insights.recurring(conn, today, tracked=[*others, new]), key)
-    words = _settings_words(cadence, bool(varies), usual)
+    words = _settings_words(cadence, bool(varies), usual, pinned)
     if action == "track" and not tracked:
         summary = f"Track {name} as a bill {words} ({_next_words(after)})."
     else:
         was = _settings_words(before["cadence"], before["variable"],
-                              base["usually"] if tracked else None)
+                              base["usually"] if tracked else None, bool(base["pin"]) if tracked else False)
         summary = (f"Change {name}'s bill to {words} (now {was}; {_next_words(after)})." if words != was else
                    f"Keep {name}'s bill {words} ({_next_words(after)}); nothing changes.")
     return {"action": action, "key": key, "merchant": name, "row": new, "before": before, "bill": after,
             "summary": summary}
 
 
-COLUMNS = ("merchant_key", "merchant", "cadence", "variable", "usual_low", "usual_high", "anchor_date", "anchor_amount",
-           "anchor_transaction_id")
+COLUMNS = ("merchant_key", "merchant", "cadence", "variable", "usual_low", "usual_high", "pinned", "anchor_date",
+           "anchor_amount", "anchor_transaction_id")
 
 
 def apply(conn: sqlite3.Connection, p: dict[str, Any], today: date) -> dict[str, Any]:

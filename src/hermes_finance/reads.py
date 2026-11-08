@@ -550,7 +550,9 @@ BILL_FIELDS = ("merchant", "key", "kind", "category", "amount", "cadence", "inte
                # TASK-21: the schedule's words, a changing amount's estimate and usual range, tracked by hand or found,
                # the account the last charge came from, and whether it was far from what the owner said is usual
                "cadence_label", "variable", "estimate", "amount_label", "usual", "source", "last_amount", "last_account",
-               "outlier")
+               "outlier",
+               # v20: the amount is the usual the owner set, whatever the charges say
+               "pinned")
 
 
 def bills(conn: sqlite3.Connection, today: date, next_days: int = 14) -> dict[str, Any]:
@@ -777,7 +779,10 @@ def networth_custom_text(p: dict[str, Any]) -> str:
 
 
 def bill_amount_text(b: dict[str, Any]) -> str:
-    """$465.10 for a fixed amount; ~$125 est. (usually $100–150) for one that changes (TASK-21)."""
+    """$465.10 for a fixed amount; ~$125 est. (usually $100–150) for one that changes (TASK-21); $445.00 (what you set)
+    for a pinned amount (v20)."""
+    if b.get("pinned") and b["usual"]:
+        return b["amount_label"] + " (what you set)"
     if not b["variable"]:
         return _m(b["amount"])
     u = b["usual"]

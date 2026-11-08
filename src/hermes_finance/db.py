@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import config
 
-SCHEMA_VERSION = 19  # 2: balance_snapshots; 3: ai_runs, ai_run_groups, ai_reviews;
+SCHEMA_VERSION = 20  # 2: balance_snapshots; 3: ai_runs, ai_run_groups, ai_reviews;
                      # 4: manual_accounts, manual_balance_history, loan_payments, holding_snapshots;
                      # 5: institutions, security_logos; 6: settings;
                      # 7: manual_accounts vin..value_source, asset_valuations, vin_decodes, api_usage, api_calls;
@@ -41,6 +41,8 @@ SCHEMA_VERSION = 19  # 2: balance_snapshots; 3: ai_runs, ai_run_groups, ai_revie
                      # 19 (category names): Transport / Shopping / Health -> Other Transport / Other Shopping / Other
                      #    Health and the group Other -> Misc, by id (_v19_rename); new icons, catch-alls last, and the
                      #    Plaid defaults re-filed by today's map (_v19_schema)
+                     # 20 (pinned bills): tracked_bills.pinned, the owner's usual amount as the expected amount
+                     #    whatever the charges say (V20_COLUMNS, _v20_schema)
 
 # Estimated values of manual vehicles (the Carfax trade-in) and properties (the Redfin Estimate): one row per successful
 # lookup, never updated. Rows 'marketcheck' / 'rentcast' (before TASK-13b) stay as history, never shown or used.
@@ -833,6 +835,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(VIEWS)
         _task19_schema(conn)
         _task21_schema(conn)
+        _v20_schema(conn)   # after tracked_bills exists: a database from before v13 has no table to alter yet
         if before < 19:   # before the defaults go in: they carry the new names, and the old rows keep their ids
             _v19_rename(conn)
         conn.executemany(
@@ -1047,7 +1050,9 @@ CREATE TABLE IF NOT EXISTS tracked_bills (
     anchor_transaction_id TEXT,
     created_at            TEXT NOT NULL,          -- UTC timestamps
     updated_at            TEXT NOT NULL,
-    stopped_at            TEXT
+    stopped_at            TEXT,
+    pinned                INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))   -- v20: 1: usual_low..usual_high IS the
+                                                                               -- expected amount, whatever the charges say
 );
 """
 
@@ -1055,6 +1060,20 @@ CREATE TABLE IF NOT EXISTS tracked_bills (
 def _task21_schema(conn: sqlite3.Connection) -> None:
     """v12 -> v13 (TASK-21): the tracked_bills table. Idempotent (CREATE IF NOT EXISTS)."""
     conn.executescript(TASK21_SCHEMA)
+
+
+# v20 (pinned bills): columns added to tables that init_schema creates AFTER the ADDED_COLUMNS loop runs, so they get
+# their own guarded step. (table, column, declaration); the same shape as ADDED_COLUMNS, for the upgrade tests.
+V20_COLUMNS = [
+    ("tracked_bills", "pinned", "INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))"),
+]
+
+
+def _v20_schema(conn: sqlite3.Connection) -> None:
+    """v19 -> v20: tracked_bills.pinned (0 on every old row). Idempotent: skipped once the column is there."""
+    for table, column, decl in V20_COLUMNS:
+        if column not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 # --- TASK-24 fix: rule deletion receipts (the rules manager's Undo) -------------------------------------------------------

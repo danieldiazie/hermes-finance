@@ -45,7 +45,7 @@ V19_RENAMED = {"Transport": "Other Transport", "Shopping": "Other Shopping", "He
 def dump(conn, tables=V1_TABLES):
     """Every row of `tables`, in the columns they had before v7 (v7 adds columns to manual_accounts; an old row keeps
     every value it had)."""
-    added = {(t, c) for t, c, _ in db.ADDED_COLUMNS + db.TASK18_COLUMNS}  # TASK-18: transactions.source ... too
+    added = {(t, c) for t, c, _ in db.ADDED_COLUMNS + db.TASK18_COLUMNS + db.V20_COLUMNS}  # TASK-18: transactions.source ... too
     added |= {("goals", "icon"), ("goals", "colour")}  # v17 appearance does not alter original goal values
     out = {}
     for t in tables:
@@ -98,7 +98,7 @@ def test_upgrade_from_v1_keeps_every_row_and_adds_snapshots(data_dir, client, fa
 
     conn = db.connect(path)  # the live DB is upgraded exactly like this on the next start
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn) == before
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(balance_snapshots)")]
     assert cols == ["account_id", "date", "current", "available", "iso_currency"]
@@ -171,7 +171,7 @@ def test_upgrade_from_v2_keeps_every_row_and_adds_ai_tables(data_dir):
 
     conn = db.connect(path)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn, V2_TABLES) == before
     assert columns(conn, "ai_runs") == (["run_id", "created_at", "applied_at", "queued_groups", "queued_txns",
                                          "summary_json"], ["run_id"])
@@ -281,7 +281,7 @@ def test_upgrade_from_v3_keeps_every_row_and_adds_manual_tables(data_dir):
 
     conn = db.connect(path)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn, V3_TABLES) == before
     assert columns(conn, "manual_accounts") == (
         ["id", "kind", "name", "institution", "subtype", "balance", "credit_limit", "interest_rate", "original_amount",
@@ -412,7 +412,7 @@ def test_upgrade_from_v4_keeps_every_row_and_adds_the_logo_caches(data_dir):
 
     conn = db.connect(path)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn, V4_TABLES) == before
     assert columns(conn, "institutions") == (["institution_id", "name", "logo_png", "logo_source", "primary_color", "url",
                                               "fetched_at"], ["institution_id"])
@@ -464,7 +464,7 @@ def test_upgrade_from_v5_keeps_every_row_and_adds_settings(data_dir):
 
     conn = db.connect(path)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn, V5_TABLES) == before
     assert columns(conn, "settings") == (["key", "value", "updated_at"], ["key"])
     with pytest.raises(sqlite3.IntegrityError):
@@ -514,7 +514,7 @@ def test_upgrade_from_v6_adds_valuation(data_dir):
 
     conn = db.connect(path)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn, V6_TABLES) == before                          # every old value kept
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(manual_accounts)")]
     assert cols[-10:] == ["vin", "vehicle_trim", "mileage", "mileage_as_of", "zip_code", "address", "vin_decoded",
@@ -623,7 +623,7 @@ def _upgrade_and_check(path: Path, raw: sqlite3.Connection, tables: list[str]) -
     before = dump(raw, tables)
     raw.close()
     conn = db.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 20
     assert dump(conn, tables) == before
     assert set(V11_NEW + V12_NEW + V13_NEW + V14_NEW + ["pending_actions"]) <= _names(conn) and "v_spend_lines" in _names(conn, "view")
     fresh = db.connect(path.parent / "fresh.db")
@@ -737,7 +737,7 @@ def test_upgrade_from_v12_to_v13_adds_only_tracked_bills(data_dir):
     conn = _upgrade_and_check(path, raw, tables)
     assert [r[1] for r in conn.execute("PRAGMA table_info(tracked_bills)")] == [
         "id", "merchant_key", "merchant", "cadence", "variable", "usual_low", "usual_high", "anchor_date", "anchor_amount",
-        "anchor_transaction_id", "created_at", "updated_at", "stopped_at"]
+        "anchor_transaction_id", "created_at", "updated_at", "stopped_at", "pinned"]
     with pytest.raises(sqlite3.IntegrityError):   # its checks hold: a schedule it doesn't know, a usual range upside down
         with conn:
             conn.execute("INSERT INTO tracked_bills (merchant_key, merchant, cadence, variable, anchor_date, anchor_amount, "
@@ -791,4 +791,29 @@ def test_upgrade_from_v13_to_v14_adds_rule_deletions_and_keeps_every_row(data_di
     assert back["relinked"] == 1 and back["rule"]["id"] == user_rule and back["rule"]["source"] == "user"
     assert tuple(conn.execute("SELECT category_id, source, rule_id, detached_by FROM classifications WHERE transaction_id = 't1'"
                               ).fetchone())[1:] == ("rule", user_rule, None)
+    conn.close()
+
+
+def test_upgrade_from_v19_to_v20_adds_tracked_bills_pinned_and_keeps_every_row(data_dir):
+    """v20 (pinned bills): a v19 database (db.py at 92a84ac, the 0.2.6 release) with a tracked bill gets
+    tracked_bills.pinned, 0 on the old row (its amount still comes from its charges), as the LAST column, the way a fresh
+    database has it, and nothing else changes. Its check holds (0 or 1)."""
+    path = config.db_path()
+    raw = _old_db(path, "schema_v19.sql", 19)
+    ts = "2026-08-05T00:00:00Z"
+    raw.execute("INSERT INTO tracked_bills (merchant_key, merchant, cadence, variable, usual_low, usual_high, anchor_date, "
+                "anchor_amount, created_at, updated_at) VALUES ('netflix', 'Netflix', 'monthly', 1, 12, 18, '2026-08-01', 15.49, ?, ?)",
+                (ts, ts))
+    raw.commit()
+    assert "pinned" not in [r[1] for r in raw.execute("PRAGMA table_info(tracked_bills)")]
+    tables = V9_UP + ["pending_actions"] + V11_NEW + V12_NEW + V13_NEW + V14_NEW
+    conn = _upgrade_and_check(path, raw, tables)
+    assert [r[1] for r in conn.execute("PRAGMA table_info(tracked_bills)")][-1] == "pinned"
+    assert [tuple(r) for r in conn.execute("SELECT merchant_key, usual_low, usual_high, pinned FROM tracked_bills")] == \
+        [("netflix", 12.0, 18.0, 0)]
+    item = insights.recurring(conn, date(2026, 9, 28))["items"][0]
+    assert item["merchant"] == "Netflix" and item["pinned"] is False and item["amount"] == 15.0   # the usual's middle: 1 charge
+    with pytest.raises(sqlite3.IntegrityError):
+        with conn:
+            conn.execute("UPDATE tracked_bills SET pinned = 2")
     conn.close()

@@ -392,7 +392,7 @@ def test_track_update_stop_through_the_routes(c, app):
     assert (r2["cadence"], r2["usual_low"], r2["anchor_date"], r2["created_at"]) == ("quarterly", 100.0, "2026-08-30", r["created_at"])
     status, look = call(app, "GET", f"/api/bills/lookup?transaction_id={tid}", LOCAL)
     assert status == 200 and look["tracked"] and look["bill"]["cadence"] == "quarterly" and look["outlier"] == "higher"
-    assert look["suggest"] == {"every": "3m", "varies": True, "usually": [100.0, 150.0]}
+    assert look["suggest"] == {"every": "3m", "varies": True, "usually": [100.0, 150.0], "pin": False}
     status, out = call(app, "POST", "/api/bills/stop", JSONH, {"key": key})
     assert status == 200 and out["bill"] is None and row(c)["stopped_at"] is not None and LADWP not in rec(c)
     status, look = call(app, "GET", f"/api/bills/lookup?key={key}", LOCAL)
@@ -778,3 +778,165 @@ def test_the_sunday_summary_inputs_carry_the_new_bills(c, app):
             ("~$125 est.", "every 2 months", True, "tracked")
     assert next(b for b in ov["pace"]["bills_due"] if b["merchant"] == LADWP)["variable"] is True
     assert ov["recurring_totals"] == recp["monthly_totals"]
+
+
+# --- 10. v20: "Use my amount" (pinned), and a month ahead reserving its bills ------------------------------------------
+# A storage unit billed monthly at $372.04 whose price rose to $445: the owner knows the next charge better than the
+# charges do. Charges Aug 30, Jul 30, Jun 29, May 29 (31 days apart; next: Sep 30, this month's "still due").
+
+def cubesmart(conn, n=4, amount=372.04, last=29):
+    return series(conn, "CubeSmart", 31, n, amount=amount, cat="Rent & Utilities", last=last)
+
+
+def test_a_pinned_fixed_bill_expects_what_you_set_however_many_charges(c):
+    cubesmart(c)
+    assert (rec(c)["CubeSmart"]["amount"], rec(c)["CubeSmart"]["pinned"]) == (372.04, False)      # detected: its charges
+    out = track(c, merchant="CubeSmart", varies=False, usually=445, pin=True)
+    b = out["bill"]
+    assert (b["amount"], b["amount_label"], b["variable"], b["pinned"], b["monthly_amount"], b["estimate"]) == \
+        (445.0, "$445", False, True, 445.0, None)
+    assert b["usual"] == {"low": 445.0, "high": 445.0, "source": "you"} and b["next_expected"] == "2026-09-30"
+    assert (row(c, "cubesmart")["variable"], row(c, "cubesmart")["pinned"]) == (0, 1)   # the pin never flips Same each time
+    assert out["summary"] == "Track CubeSmart as a bill every month, $445 (what you set) (next ~Sep 30, $445)."
+    assert bills.amount_words(b) == reads.bill_amount_text(b) == "$445 (what you set)"
+    # a range pinned: its middle; without varies given, the bill stays the same each time
+    b = bills.apply(c, bills.plan(c, TODAY, "update", merchant="CubeSmart", usually=[440, 450], pin=True), TODAY)["bill"]
+    assert (b["amount"], b["variable"], b["pinned"]) == (445.0, False, True)
+
+
+def test_a_pinned_changing_bill_overrides_the_median_of_its_charges(c):
+    """Two monthly charges from one merchant (phone + internet) detected as one $121.83 bill: the owner pins the combined
+    $232. Without the pin (asked for), the median of the last 3 charges wins as before."""
+    series(c, "Verizon", 30, 4, amount=121.83, cat="Rent & Utilities", last=9)
+    b = track(c, merchant="Verizon", varies=True, usually=232, pin=True)["bill"]
+    assert (b["amount"], b["amount_label"], b["variable"], b["pinned"], b["estimate"]) == (232.0, "~$232 est.", True, True, 232.0)
+    assert reads.bill_amount_text(b) == "~$232 est. (what you set)"
+    b = track(c, merchant="Verizon", varies=True, usually=232)["bill"]           # not asked about: the pin stays
+    assert (b["amount"], b["pinned"]) == (232.0, True)
+    b = track(c, merchant="Verizon", varies=True, usually=232, pin=False)["bill"]  # back to the charges: the median
+    assert (b["amount"], b["pinned"], b["usual"]) == (121.83, False, {"low": 232.0, "high": 232.0, "source": "you"})
+
+
+def test_the_pin_needs_an_amount_clearing_the_amount_clears_it_and_the_old_rule_still_holds(c):
+    cubesmart(c)
+    with pytest.raises(bills.BillError) as e:
+        bills.plan(c, TODAY, "track", merchant="CubeSmart", pin=True)
+    assert e.value.field == "usually" and "needs the amount" in str(e.value) and count(c) == 0
+    with pytest.raises(bills.BillError) as e:
+        bills.plan(c, TODAY, "track", merchant="CubeSmart", usually=445, pin="yes")
+    assert e.value.field == "pin" and count(c) == 0
+    track(c, merchant="CubeSmart", usually=445, pin=True)
+    b = bills.apply(c, bills.plan(c, TODAY, "update", merchant="CubeSmart", usually=None), TODAY)["bill"]   # null clears both
+    assert (b["amount"], b["pinned"], b["usual"], row(c, "cubesmart")["pinned"]) == (372.04, False, None, 0)
+    with pytest.raises(bills.BillError) as e:                 # without the pin, a usual amount still means it changes
+        bills.plan(c, TODAY, "update", merchant="CubeSmart", varies=False, usually=445)
+    assert "usually is for a bill whose amount changes" in str(e.value)
+    b = bills.apply(c, bills.plan(c, TODAY, "update", merchant="CubeSmart", usually=445), TODAY)["bill"]
+    assert (b["variable"], b["amount"], b["pinned"]) == (True, 372.04, False)   # as before v20: varies, median of 3
+
+
+def test_a_stopped_pinned_bill_keeps_its_pin_and_a_detected_bill_stops_cleanly(c):
+    cubesmart(c)
+    track(c, merchant="CubeSmart", usually=445, pin=True)
+    assert bills.apply(c, bills.plan(c, TODAY, "stop", merchant="CubeSmart"), TODAY)["bill"] is None
+    assert row(c, "cubesmart")["stopped_at"] and row(c, "cubesmart")["pinned"] == 1
+    assert bills.suggest(c, "cubesmart", insights.recurring(c, TODAY)) == {"every": "1m", "varies": False,
+                                                                           "usually": (445.0, 445.0), "pin": True}
+    b = track(c, merchant="CubeSmart", usually=445)["bill"]   # tracked again with what the sheet starts from: still pinned
+    assert (b["amount"], b["pinned"], row(c, "cubesmart")["stopped_at"]) == (445.0, True, None)
+    series(c, "Netflix", 31, 4, amount=15.49, last=16)
+    out = bills.apply(c, bills.plan(c, TODAY, "stop", merchant="Netflix"), TODAY)   # a detected bill's fresh stop row
+    assert out["bill"] is None and row(c, "netflix")["pinned"] == 0 and row(c, "netflix")["stopped_at"]
+
+
+def test_a_pinned_amount_drives_budgets_the_calendar_and_every_read(c, app, capsys):
+    cap(c, "Rent & Utilities", 3000)
+    cubesmart(c)
+    before = insights.budgets(c, "2026-09", TODAY)
+    assert before["total_due"] == 372.04
+    track(c, merchant="CubeSmart", usually=445, pin=True)
+    after = insights.budgets(c, "2026-09", TODAY)
+    assert (after["total_due"], after["left"]) == (445.0, round(before["left"] - (445 - 372.04), 2))
+    assert reads.budget_status(c, "2026-09", TODAY)["totals"]["due"] == 445.0
+    chip = next(b for b in billcal.calendar_month(c, "2026-09", TODAY)["bills"] if b["merchant"] == "CubeSmart" and b["state"] == "due")
+    assert (chip["amount"], chip["variable"]) == (445.0, False)
+    assert insights.pace_projection(c, "2026-09", TODAY)["bills_due_total"] == 445.0
+    status, d = call(app, "GET", "/api/bills/lookup?key=cubesmart", LOCAL)
+    assert status == 200 and d["suggest"] == {"every": "1m", "varies": False, "usually": [445.0, 445.0], "pin": True}
+    assert d["bill"]["pinned"] is True and d["bill"]["amount"] == 445.0
+    code, out, _ = run_cli(["bills", "--next", "30d", "--json"], capsys)
+    assert next(b for b in json.loads(out)["items"] if b["merchant"] == "CubeSmart")["pinned"] is True
+    code, out, _ = run_cli(["bills", "--next", "30d"], capsys)
+    assert "$445 (what you set)" in out
+    assert next(b for b in plugin_ctx().call("finance_bills", {"next": "30d"})["items"] if b["merchant"] == "CubeSmart")["pinned"] is True
+
+
+def test_the_routes_take_pin_and_the_preview_parses_it(c, app):
+    cubesmart(c)
+    status, out = call(app, "GET", "/api/bills/preview?key=cubesmart&action=update&varies=0&usually=445&pin=1", LOCAL)
+    assert status == 200 and (out["bill"]["amount"], out["bill"]["pinned"], out["bill"]["variable"]) == (445.0, True, False)
+    assert count(c) == 0
+    status, out = call(app, "POST", "/api/bills/track", JSONH,
+                       {"action": "update", "key": "cubesmart", "varies": False, "usually": "445", "pin": True})
+    assert status == 200 and out["bill"]["amount"] == 445.0 and (row(c, "cubesmart")["pinned"], row(c, "cubesmart")["variable"]) == (1, 0)
+    status, out = call(app, "POST", "/api/bills/track", JSONH, {"action": "update", "key": "cubesmart", "pin": True, "usually": ""})
+    assert status == 400 and out["field"] == "usually"
+    status, out = call(app, "POST", "/api/bills/track", JSONH, {"action": "update", "key": "cubesmart", "pin": "yes"})
+    assert status == 400 and out["field"] == "pin"
+    assert row(c, "cubesmart")["pinned"] == 1                                       # refused: nothing changed
+    status, out = call(app, "POST", "/api/bills/track", JSONH, {"action": "update", "key": "cubesmart", "pin": False})
+    assert status == 200 and out["bill"]["amount"] == 372.04 and row(c, "cubesmart")["pinned"] == 0
+
+
+def test_the_tool_and_the_cli_pin_and_unpin(c, capsys):
+    cubesmart(c)
+    p = plugin_ctx()
+    args = {"action": "update", "merchant": "CubeSmart", "usually": 445, "pin": True}
+    card = p.call("finance_track_bill", args)["directive"]
+    assert card == {"action": "approve", "message": "Change CubeSmart's bill to every month, $445 (what you set) (now every "
+                                                    "month, the same amount each time; next ~Sep 30, $445)."}
+    out = p.approved("finance_track_bill", args)
+    assert (out["bill"]["amount"], out["bill"]["pinned"], row(c, "cubesmart")["variable"]) == (445.0, True, 0)
+    directive = p.call("finance_track_bill", {"action": "stop", "merchant": "CubeSmart", "pin": True})["directive"]
+    assert directive["action"] == "block" and "stop takes only the merchant" in directive["message"]
+    code, out, err = run_cli(["bills", "track", "CubeSmart", "--same", "--usually", "460", "--pin"], capsys)
+    assert code == 0 and row(c, "cubesmart")["pinned"] == 1 and "$460 (what you set)" in out, err
+    code, out, err = run_cli(["bills", "track", "CubeSmart", "--unpin"], capsys)
+    assert code == 0 and row(c, "cubesmart")["pinned"] == 0 and rec(c)["CubeSmart"]["amount"] == 372.04
+    code, out, err = run_cli(["bills", "track", "CubeSmart", "--pin"], capsys)
+    assert code == 2 and "needs the amount" in err and out == ""
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["bills", "track", "x", "--pin", "--unpin"])
+
+
+def test_a_month_ahead_reserves_the_bills_the_calendar_projects_there(c, app):
+    """Seen from Sep 28: October's budget already owes CubeSmart (Oct 30), Netflix (Oct 12) and an every-2-months water
+    bill (Oct 30); November owes the first two only; August (past) owes nothing. The pace and the Overview projection
+    stay about this month."""
+    cap(c, "Rent & Utilities", 3000)
+    cap(c, "Entertainment", 100)
+    cubesmart(c)                                                        # Aug 30 -> Sep 30 -> Oct 30 -> Nov 30
+    series(c, "Netflix", 31, 4, amount=15.49, last=16)                  # Sep 12 (paid this month) -> Oct 12 -> Nov 12
+    series(c, "Water Co", 61, 2, amount=80.0, cat="Rent & Utilities", last=29)   # Aug 30, every 2 months -> Oct 30 -> Dec 30
+    assert {m: r["next_expected"] for m, r in rec(c).items()} == {"CubeSmart": "2026-09-30", "Netflix": "2026-10-12",
+                                                                   "Water Co": "2026-10-30"}
+    sep = insights.budgets(c, "2026-09", TODAY)
+    assert sep["total_due"] == 372.04                                   # this month: as before
+    by = insights.bills_due_by_category(c, "2026-10", TODAY)
+    assert [(b["merchant"], b["next_expected"], b["amount"]) for b in by["Rent & Utilities"]] == \
+        [("CubeSmart", "2026-10-30", 372.04), ("Water Co", "2026-10-30", 80.0)]
+    assert [(b["merchant"], b["next_expected"]) for b in by["Entertainment"]] == [("Netflix", "2026-10-12")]
+    octb = insights.budgets(c, "2026-10", TODAY)
+    assert (octb["total_due"], octb["total_spend"], octb["left"]) == (467.53, 0.0, 2632.47)
+    assert (octb["days_left"], octb["per_day"]) == (31, round(2632.47 / 31, 2))
+    assert [(b["merchant"], b["next_expected"]) for b in octb["bills_due"]] == \
+        [("Netflix", "2026-10-12"), ("CubeSmart", "2026-10-30"), ("Water Co", "2026-10-30")]
+    ent = next(x for x in octb["categories"] if x["category"] == "Entertainment")
+    assert (ent["due"], ent["left"], ent["status"]) == (15.49, 84.51, "ok")
+    nov = insights.budgets(c, "2026-11", TODAY)
+    assert (nov["total_due"], [b["merchant"] for b in nov["bills_due"]]) == (387.53, ["Netflix", "CubeSmart"])
+    assert insights.budgets(c, "2026-08", TODAY)["total_due"] == 0.0            # a past month owes nothing
+    assert insights.pace_projection(c, "2026-10", TODAY)["bills_due"] == []     # the pace stays about this month
+    assert reads.budget_status(c, "2026-10", TODAY)["totals"]["due"] == 467.53
+    status, page = call(app, "GET", "/api/budgets?month=2026-10", LOCAL)
+    assert status == 200 and page["budgets"]["total_due"] == 467.53 and len(page["budgets"]["bills_due"]) == 3

@@ -797,15 +797,17 @@ JSON: {today, next_days, until, count,
   interval + 5 days since the last charge: monthly 40, every 2 months 75). paid_this_month: its last charge was this
   calendar month. Sorted by next_expected.
 
-  finance bills track MERCHANT [--every 2m] [--varies | --same] [--usually 100-150]   (writes)
-  finance bills untrack MERCHANT                                                      (writes)
+  pinned: the amount is the usual you gave (--pin), whatever the charges say; amount_label "$445.00".
+
+  finance bills track MERCHANT [--every 2m] [--varies | --same] [--usually 100-150] [--pin | --unpin]   (writes)
+  finance bills untrack MERCHANT                                                                       (writes)
 ```
 
 ### `finance bills track` {#finance-bills-track}
 
 ```text
 usage: finance bills track [-h] [--every 2w|1m|2m|3m|6m|1y] [--varies | --same]
-                           [--usually 100-150] [--json]
+                           [--usually 100-150] [--pin | --unpin] [--json]
                            merchant
 
 Track a merchant as a bill: every charge from it, on any account, confirms it.
@@ -819,7 +821,10 @@ options:
                         the schedule (default: the one it was detected on, else 1m); 1w also works
   --varies              the amount changes each time
   --same                the same amount each time
-  --usually 100-150     what it usually is: an amount or a range (implies --varies)
+  --usually 100-150     what it usually is: an amount or a range (implies --varies, unless --pin)
+  --pin                 use --usually as the expected amount, whatever the charges say (same or
+                        changing)
+  --unpin               back to the amount its charges say
   --json                print the result as JSON
 
 Every charge from the merchant, on any account, confirms the bill; the next one is expected one schedule after
@@ -827,6 +832,9 @@ the last. --every: 1w, 2w, 1m, 2m, 3m, 6m or 1y. Not given: the schedule it was 
 amount "changes each time" for a utility, else the same each time. It starts from the merchant's latest charge. Tracking
 a bill again replaces its settings. --usually (a bill that changes): one amount or a range; while there are fewer than 3
 charges its middle is the estimate (one big bill doesn't set it), after that the median of the last 3.
+--pin: --usually IS the expected amount (a range: its middle), however many charges there are, and for a bill that is
+the same each time too (you know the next charge: a price rise, two charges from one merchant). --unpin: back to the
+charges. The pin needs --usually; clearing the usual amount clears it.
 
 The merchant must be in your transactions: its exact name, or a unique case-insensitive match (an ambiguous or unknown
 name is refused with the candidates). Exit 2 and nothing saved when it can't be done.

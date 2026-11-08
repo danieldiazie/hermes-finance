@@ -3749,7 +3749,8 @@
     })) : msgBox('Nothing expected', 'No recurring charges in the next 30 days.');
     const row = (r, narrow) => {  // the narrow Subscriptions card puts the status under the amount
       const per = r.cadence === 'monthly' ? '' : ` · ${money2(r.monthly_amount)} a month`;
-      const usual = r.variable && r.usual ? ` · usually ${usualText(r.usual)}` : '';  // TASK-21: a bill that changes
+      const usual = r.pinned && r.usual ? ' · what you set'  // v20: the amount is the one the owner set
+        : r.variable && r.usual ? ` · usually ${usualText(r.usual)}` : '';  // TASK-21: a bill that changes
       const amount = h('span', {class: 'amt v', style: {'min-width': '88px', 'text-align': 'right'}}, billAmt(r));
       // TASK-21: the row opens the bill's sheet (its schedule, charges, Edit schedule and Stop tracking)
       return h('button', {class: `li wrap${isPaid(r) ? ' paid' : ''}`, type: 'button', dataset: {bill: r.key, ...(r.variable ? {est: ''} : {})},

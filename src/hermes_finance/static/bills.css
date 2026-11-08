@@ -12,3 +12,8 @@
 .billsheet .tsec .li .grow > b { display: flex; align-items: center; flex-wrap: wrap; }
 .billsheet .tsec .li .grow > span { display: flex; min-width: 0; font-size: 13px; color: var(--mut); }
 .pend[data-outlier] { display: inline-block; white-space: nowrap; }  /* "higher than usual" stays one tag */
+/* v20: the "Use my amount" row: the words on the left, the switch on the right, one line (like the cap editor's roll-over row) */
+.billsheet .pinrow { display: flex; align-items: center; gap: 12px; }
+.billsheet .pinrow .grow { display: flex; flex-direction: column; min-width: 0; }
+.billsheet .pinrow .grow > b { font-size: 15px; font-weight: 600; }
+.billsheet .pinrow .grow > span { font-size: 13px; color: var(--mut); }

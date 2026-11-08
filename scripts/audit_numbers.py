@@ -1538,6 +1538,26 @@ def check_batch_c(A: Audit, S: "Site", ov: dict, acc: dict, bp: dict, rec: dict,
              [(b["date"], b["merchant"], b["amount"], "paid" if b["state"] == "paid" else "due") for b in cal["bills"]], want)
         A.eq(f"calendar {m}: paid + still due = total", cal["paid_total"] + cal["due_total"], cal["total"])
         A.eq(f"calendar {m}: paid = the paid bills", cal["paid_total"], sum(b[2] for b in want if b[3] == "paid"))
+        if m > month:
+            # v20: a month ahead reserves its bills. Every capped category's `due` on the Budgets page for that month is
+            # exactly the calendar's due chips (monthly or slower: PERIODIC; weekly ones are paced, not due) in that
+            # category, worked out again from the calendar the page did not read. Per category, so a group budget's own
+            # roll-up needs no second derivation here.
+            ahead = S.get("/api/budgets", month=m)
+            for c in ahead["categories"]:
+                if c["cap"] is None:
+                    continue
+                A.eq(f"budgets {m} (a month ahead): {c['category']}: bills due = the calendar's due chips in it", c["due"],
+                     r2(sum(b["amount"] for b in cal["bills"]
+                            if b["state"] == "due" and b["cadence"] in PERIODIC and b["category"] == c["category"])))
+                A.eq(f"budgets {m} (a month ahead): {c['category']}: left = cap - due (nothing spent yet)", c["left"],
+                     r2(c["cap"] - c["due"]))
+            # not vacuous: where a capped category has a periodic chip in the month, its `due` is above zero (a DB with
+            # bills but no caps, or caps but no bills ahead, has nothing to reserve and passes)
+            chipped = {b["category"] for b in cal["bills"] if b["state"] == "due" and b["cadence"] in PERIODIC}
+            capped_ahead = [c for c in ahead["categories"] if c["cap"] is not None and c["category"] in chipped]
+            A.ok(f"budgets {m} (a month ahead): every capped category with a bill chip reserves it (the check is not empty)",
+                 all(c["due"] > 0 for c in capped_ahead), got=[(c["category"], c["due"]) for c in capped_ahead])
     cal = S.get("/api/bills-calendar", month=month)
     D = dom["recurring"].get("cal")
     if D:

@@ -512,6 +512,7 @@ Kind: write (needs approval).
 | `every` | string | no | one of `1w`, `2w`, `1m`, `2m`, `3m`, `6m`, `1y` | the schedule: 2w, 1m, 2m, 3m, 6m or 1y (also 1w); default: the detected one, else 1m |
 | `varies` | boolean | no |  | true: the amount changes each time (a utility); default: from the category |
 | `usually` | number or array or null (items: number) | no | min items 1; max items 2 | what a bill that changes usually is: an amount, or [low, high] (null clears it) |
+| `pin` | boolean | no |  | true: usually IS the expected amount, whatever the charges say (needs usually; works for a bill that is the same each time too); false: back to the charges; default: keep |
 
 <details><summary>JSON schema</summary>
 
@@ -561,6 +562,10 @@ Kind: write (needs approval).
       "minItems": 1,
       "maxItems": 2,
       "description": "what a bill that changes usually is: an amount, or [low, high] (null clears it)"
+    },
+    "pin": {
+      "type": "boolean",
+      "description": "true: usually IS the expected amount, whatever the charges say (needs usually; works for a bill that is the same each time too); false: back to the charges; default: keep"
     }
   },
   "required": [
